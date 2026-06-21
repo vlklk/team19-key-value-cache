@@ -3,6 +3,7 @@
 #include <chrono>
 #include <expected>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -55,6 +56,8 @@ private:
 
     size_t used_memory_ = 0;
     CacheStats stats_;
+
+    mutable std::mutex mutex_;
 
     CacheEntry* Find(const std::string& key) {
         auto it = data_.find(key);
@@ -144,6 +147,7 @@ public:
 
     std::expected<void, std::string> Put(const std::string& key, const std::string& value,
                                          std::optional<std::chrono::seconds> ttl = std::nullopt) {
+        std::lock_guard<std::mutex> lock(mutex_);
         DeleteOldKeys();
 
         if (key.empty()) { return std::unexpected("empty key"); }
@@ -201,6 +205,7 @@ public:
     }
 
     std::optional<std::string> Get(const std::string& key) {
+        std::lock_guard<std::mutex> lock(mutex_);
         CacheEntry* entry = Find(key);
 
         if (!entry) {
@@ -215,6 +220,7 @@ public:
     }
 
     bool Erase(const std::string& key) {
+        std::lock_guard<std::mutex> lock(mutex_);
         CacheEntry* entry = Find(key);
 
         if (!entry) { return false; }
@@ -226,16 +232,24 @@ public:
     }
 
     void Clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
         data_.clear();
         used_memory_ = 0;
         policy_->Clear();
     }
 
-    size_t Size() const { return data_.size(); }
+    size_t Size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return data_.size();
+    }
 
-    size_t UsedMemory() const { return used_memory_; }
+    size_t UsedMemory() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return used_memory_;
+    }
 
     CacheStats Stats() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         CacheStats res = stats_;
         res.used_memory = used_memory_;
         res.size = data_.size();

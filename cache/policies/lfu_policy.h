@@ -40,7 +40,7 @@ public:
 
         auto best = data_.begin();
 
-        for (auto it = data_.begin(); it != data_.end(); ++it) {
+        for (auto it = data_.begin(); it != data_.end(); it++) {
             if (it->second.count < best->second.count) {
                 best = it;
             } else if (it->second.count == best->second.count &&
