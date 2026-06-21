@@ -18,9 +18,7 @@ public:
     void OnAccess(const std::string& key) override {
         auto it = position_.find(key);
 
-        if (it == position_.end()) {
-            return;
-        }
+        if (it == position_.end()) { return; }
 
         order_.erase(it->second);
         order_.push_front(key);
@@ -30,18 +28,14 @@ public:
     void OnErase(const std::string& key) override {
         auto it = position_.find(key);
 
-        if (it == position_.end()) {
-            return;
-        }
+        if (it == position_.end()) { return; }
 
         order_.erase(it->second);
         position_.erase(it);
     }
 
     std::optional<std::string> Victim() override {
-        if (order_.empty()) {
-            return std::nullopt;
-        }
+        if (order_.empty()) { return std::nullopt; }
 
         return order_.back();
     }

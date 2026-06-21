@@ -11,23 +11,18 @@
 class RandomPolicy : public EvictionPolicy {
 public:
     void OnInsert(const std::string& key) override {
-        if (position_.contains(key)) {
-            return;
-        }
+        if (position_.contains(key)) { return; }
 
         position_[key] = keys_.size();
         keys_.push_back(key);
     }
 
-    void OnAccess(const std::string&) override {
-    }
+    void OnAccess(const std::string&) override {}
 
     void OnErase(const std::string& key) override {
         auto it = position_.find(key);
 
-        if (it == position_.end()) {
-            return;
-        }
+        if (it == position_.end()) { return; }
 
         size_t index = it->second;
         std::string last = keys_.back();
@@ -40,9 +35,7 @@ public:
     }
 
     std::optional<std::string> Victim() override {
-        if (keys_.empty()) {
-            return std::nullopt;
-        }
+        if (keys_.empty()) { return std::nullopt; }
 
         std::uniform_int_distribution<size_t> dist(0, keys_.size() - 1);
         return keys_[dist(gen_)];

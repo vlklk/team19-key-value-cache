@@ -26,31 +26,25 @@ public:
     void OnAccess(const std::string& key) override {
         auto it = data_.find(key);
 
-        if (it == data_.end()) {
-            return;
-        }
+        if (it == data_.end()) { return; }
 
         ++time_;
         ++it->second.count;
         it->second.time = time_;
     }
 
-    void OnErase(const std::string& key) override {
-        data_.erase(key);
-    }
+    void OnErase(const std::string& key) override { data_.erase(key); }
 
     std::optional<std::string> Victim() override {
-        if (data_.empty()) {
-            return std::nullopt;
-        }
+        if (data_.empty()) { return std::nullopt; }
 
         auto best = data_.begin();
 
         for (auto it = data_.begin(); it != data_.end(); ++it) {
             if (it->second.count < best->second.count) {
                 best = it;
-            }
-            else if (it->second.count == best->second.count && it->second.time < best->second.time) {
+            } else if (it->second.count == best->second.count &&
+                       it->second.time < best->second.time) {
                 best = it;
             }
         }

@@ -8,40 +8,149 @@
 #include <unordered_map>
 #include <utility>
 
-#include "cache_config.h"
-#include "cache_entry.h"
-#include "cache_stats.h"
-#include "eviction_policy.h"
-#include "noeviction_policy.h"
-#include "policy_base.h"
+#include "policies/eviction_policy.h"
+#include "policies/noeviction_policy.h"
+#include "policies/policy_base.h"
+
+struct CacheEntry {
+public:
+    std::string value;
+    std::optional<std::chrono::steady_clock::time_point> ends = std::nullopt;
+    size_t memory = 0;
+};
+
+struct CacheConfig {
+public:
+    size_t max_memory = 0;
+    size_t max_count = 0;
+    std::optional<std::chrono::seconds> ttl = std::nullopt;
+    PolicyType policy = PolicyType::Lru;
+};
+
+struct CacheStats {
+public:
+    size_t hits = 0;
+    size_t misses = 0;
+    size_t puts = 0;
+    size_t erases = 0;
+    size_t evictions = 0;
+    size_t expired = 0;
+    size_t used_memory = 0;
+    size_t size = 0;
+
+    double HitRatio() const {
+        size_t count = hits + misses;
+
+        if (count == 0) { return 0.0; }
+        return static_cast<double>(hits) / static_cast<double>(count);
+    }
+};
 
 class Cache {
-public:
-    Cache(CacheConfig config, std::unique_ptr<EvictionPolicy> policy) {
-        config_ = std::move(config);
-        policy_ = std::move(policy);
 
-        if (!policy_) {
-            policy_ = std::make_unique<NoEvictionPolicy>();
+private:
+    CacheConfig config_;
+    std::unique_ptr<EvictionPolicy> policy_;
+    std::unordered_map<std::string, CacheEntry> data_;
+
+    size_t used_memory_ = 0;
+    CacheStats stats_;
+
+    CacheEntry* Find(const std::string& key) {
+        auto it = data_.find(key);
+
+        if (it == data_.end()) { return nullptr; }
+
+        if (IsExpired(it->second)) {
+            DeleteKey(key);
+            ++stats_.expired;
+            return nullptr;
+        }
+
+        return &it->second;
+    }
+
+    bool IsExpired(const CacheEntry& entry) const {
+        if (!entry.ends.has_value()) { return false; }
+
+        return entry.ends.value() <= std::chrono::steady_clock::now();
+    }
+
+    void DeleteOldKeys() {
+        auto it = data_.begin();
+
+        while (it != data_.end()) {
+            if (IsExpired(it->second)) {
+                used_memory_ -= it->second.memory;
+                policy_->OnErase(it->first);
+                it = data_.erase(it);
+                ++stats_.expired;
+            } else {
+                ++it;
+            }
         }
     }
 
-    std::expected<void, std::string> Put(
-        const std::string& key,
-        const std::string& value,
-        std::optional<std::chrono::seconds> ttl = std::nullopt
-    ) {
+    void DeleteKey(const std::string& key) {
+        auto it = data_.find(key);
+
+        if (it == data_.end()) { return; }
+
+        used_memory_ -= it->second.memory;
+        policy_->OnErase(key);
+        data_.erase(it);
+    }
+
+    size_t EstimateMemory(const std::string& key, const std::string& value) const {
+        return key.size() + value.size() + sizeof(CacheEntry);
+    }
+
+    bool NeedEviction(size_t new_memory) const {
+        if (config_.max_memory != 0 && used_memory_ + new_memory > config_.max_memory) {
+            return true;
+        }
+
+        if (config_.max_count != 0 && data_.size() + 1 > config_.max_count) { return true; }
+
+        return false;
+    }
+
+    std::expected<void, std::string> MakeSpace(size_t new_memory) {
+        while (NeedEviction(new_memory)) {
+            std::optional<std::string> victim = policy_->Victim();
+
+            if (!victim.has_value()) {
+                return std::unexpected("eviction policy does not allow insert");
+            }
+
+            if (!data_.contains(victim.value())) {
+                policy_->OnErase(victim.value());
+                continue;
+            }
+
+            DeleteKey(victim.value());
+            ++stats_.evictions;
+        }
+
+        return {};
+    }
+
+public:
+    Cache(CacheConfig config, std::unique_ptr<EvictionPolicy> policy)
+        : config_(std::move(config)), policy_(std::move(policy)) {
+
+        if (!policy_) { policy_ = std::make_unique<NoEvictionPolicy>(); }
+    }
+
+    std::expected<void, std::string> Put(const std::string& key, const std::string& value,
+                                         std::optional<std::chrono::seconds> ttl = std::nullopt) {
         DeleteOldKeys();
 
-        if (key.empty()) {
-            return std::unexpected("empty key");
-        }
+        if (key.empty()) { return std::unexpected("empty key"); }
 
         std::optional<std::chrono::seconds> real_ttl = ttl;
 
-        if (!real_ttl.has_value()) {
-            real_ttl = config_.ttl;
-        }
+        if (!real_ttl.has_value()) { real_ttl = config_.ttl; }
 
         if (real_ttl.has_value() && real_ttl.value().count() <= 0) {
             return std::unexpected("ttl must be positive");
@@ -108,9 +217,7 @@ public:
     bool Erase(const std::string& key) {
         CacheEntry* entry = Find(key);
 
-        if (!entry) {
-            return false;
-        }
+        if (!entry) { return false; }
 
         DeleteKey(key);
         ++stats_.erases;
@@ -124,13 +231,9 @@ public:
         policy_->Clear();
     }
 
-    size_t Size() const {
-        return data_.size();
-    }
+    size_t Size() const { return data_.size(); }
 
-    size_t UsedMemory() const {
-        return used_memory_;
-    }
+    size_t UsedMemory() const { return used_memory_; }
 
     CacheStats Stats() const {
         CacheStats res = stats_;
@@ -138,110 +241,12 @@ public:
         res.size = data_.size();
         return res;
     }
-
-private:
-    CacheConfig config_;
-    std::unique_ptr<EvictionPolicy> policy_;
-    std::unordered_map<std::string, CacheEntry> data_;
-
-    size_t used_memory_ = 0;
-    CacheStats stats_;
-
-    CacheEntry* Find(const std::string& key) {
-        auto it = data_.find(key);
-
-        if (it == data_.end()) {
-            return nullptr;
-        }
-
-        if (IsExpired(it->second)) {
-            DeleteKey(key);
-            ++stats_.expired;
-            return nullptr;
-        }
-
-        return &it->second;
-    }
-
-    bool IsExpired(const CacheEntry& entry) const {
-        if (!entry.ends.has_value()) {
-            return false;
-        }
-
-        return entry.ends.value() <= std::chrono::steady_clock::now();
-    }
-
-    void DeleteOldKeys() {
-        auto it = data_.begin();
-
-        while (it != data_.end()) {
-            if (IsExpired(it->second)) {
-                used_memory_ -= it->second.memory;
-                policy_->OnErase(it->first);
-                it = data_.erase(it);
-                ++stats_.expired;
-            }
-            else {
-                ++it;
-            }
-        }
-    }
-
-    void DeleteKey(const std::string& key) {
-        auto it = data_.find(key);
-
-        if (it == data_.end()) {
-            return;
-        }
-
-        used_memory_ -= it->second.memory;
-        policy_->OnErase(key);
-        data_.erase(it);
-    }
-
-    size_t EstimateMemory(const std::string& key, const std::string& value) const {
-        return key.size() + value.size() + sizeof(CacheEntry);
-    }
-
-    bool NeedEviction(size_t new_memory) const {
-        if (config_.max_memory != 0 && used_memory_ + new_memory > config_.max_memory) {
-            return true;
-        }
-
-        if (config_.max_count != 0 && data_.size() + 1 > config_.max_count) {
-            return true;
-        }
-
-        return false;
-    }
-
-    std::expected<void, std::string> MakeSpace(size_t new_memory) {
-        while (NeedEviction(new_memory)) {
-            std::optional<std::string> victim = policy_->Victim();
-
-            if (!victim.has_value()) {
-                return std::unexpected("eviction policy does not allow insert");
-            }
-
-            if (!data_.contains(victim.value())) {
-                policy_->OnErase(victim.value());
-                continue;
-            }
-
-            DeleteKey(victim.value());
-            ++stats_.evictions;
-        }
-
-        return {};
-    }
 };
 
-std::expected<std::unique_ptr<Cache>, std::string> MakeCache(CacheConfig config) {
+inline std::expected<std::unique_ptr<Cache>, std::string> MakeCache(CacheConfig config) {
     auto policy = MakePolicy(config.policy);
 
-    if (!policy.has_value()) {
-        return std::unexpected(policy.error());
-    }
+    if (!policy.has_value()) { return std::unexpected(policy.error()); }
 
     return std::make_unique<Cache>(std::move(config), std::move(policy.value()));
 }
