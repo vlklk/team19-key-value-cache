@@ -1,6 +1,7 @@
 #include <benchmark/benchmark.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -22,6 +23,19 @@ std::optional<std::chrono::seconds> ToCacheTtl(std::chrono::milliseconds ttl) {
     return seconds;
 }
 
+double PercentileNs(std::vector<double> values, double percentile) {
+    if (values.empty()) {
+        return 0.0;
+    }
+
+    std::sort(values.begin(), values.end());
+    size_t index = static_cast<size_t>(
+        std::ceil(percentile * static_cast<double>(values.size()))) - 1;
+    index = std::min(index, values.size() - 1);
+
+    return values[index];
+}
+
 void WarmupCache(Cache& cache, const BenchmarkScenario& scenario, 
     const std::string& value, std::optional<std::chrono::seconds> ttl) {
 
@@ -35,6 +49,7 @@ void WarmupCache(Cache& cache, const BenchmarkScenario& scenario,
 void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
     CacheStats stats;
     size_t put_errors = 0;
+    std::vector<double> get_latencies_ns;
 
     for (auto _ : state) {
         state.PauseTiming();
@@ -54,6 +69,8 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
         std::string value(scenario.value_size, 'x');
         auto ttl = ToCacheTtl(scenario.ttl);
         std::vector<Operation> operations = GenerateWorkload(scenario);
+        get_latencies_ns.clear();
+        get_latencies_ns.reserve(operations.size());
 
         WarmupCache(*cache, scenario, value, ttl);
 
@@ -62,8 +79,12 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
         size_t current_put_errors = 0;
         for (const Operation& operation : operations) {
             if (operation.type == OperationType::Get) {
+                auto started = std::chrono::steady_clock::now();
                 auto result = cache->Get(operation.key);
+                auto finished = std::chrono::steady_clock::now();
                 benchmark::DoNotOptimize(result);
+                get_latencies_ns.push_back(static_cast<double>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started).count()));
             } else {
                 auto result = cache->Put(operation.key, value, ttl);
                 benchmark::DoNotOptimize(result);
@@ -83,6 +104,8 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
     state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *
                             static_cast<int64_t>(scenario.request_count));
     state.counters["hit_ratio"] = stats.HitRatio();
+    state.counters["get_p50_ns"] = PercentileNs(get_latencies_ns, 0.50);
+    state.counters["get_p99_ns"] = PercentileNs(get_latencies_ns, 0.99);
     state.counters["evictions"] = static_cast<double>(stats.evictions);
     state.counters["memory_estimate"] = static_cast<double>(stats.used_memory);
     state.counters["put_errors"] = static_cast<double>(put_errors);
