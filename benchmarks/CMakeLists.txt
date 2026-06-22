@@ -11,6 +11,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googlebenchmark)
 
-add_executable(cache_benchmarks cache_benchmark.cpp)
+add_executable(cache_benchmarks cache_benchmark.cpp benchmark_config.cpp)
 
 target_link_libraries(cache_benchmarks PRIVATE cache benchmark::benchmark)
