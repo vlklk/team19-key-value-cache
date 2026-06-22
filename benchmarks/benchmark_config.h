@@ -31,6 +31,7 @@ struct BenchmarkConfig {
     std::vector<size_t> write_threads;
     size_t runs_per_config = 1;
     uint64_t seed = 42;
+    bool get_ratios_overridden = false;
     bool help_requested = false;
 };
 

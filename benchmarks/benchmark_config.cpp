@@ -199,6 +199,26 @@ std::expected<std::vector<WorkloadProfile>, std::string> ParseProfiles(std::stri
     return ParseList<WorkloadProfile>(value, ParseProfile);
 }
 
+std::vector<size_t> GetRatiosForProfile(const BenchmarkConfig& config, WorkloadProfile profile) {
+    if (config.get_ratios_overridden) {
+        return config.get_ratios;
+    }
+
+    switch (profile) {
+        case WorkloadProfile::ReadHeavy:
+            return {90};
+        case WorkloadProfile::WriteHeavy:
+            return {10};
+        case WorkloadProfile::Uniform:
+        case WorkloadProfile::Zipf:
+        case WorkloadProfile::SequentialLoop:
+        case WorkloadProfile::Burst:
+            return config.get_ratios;
+    }
+
+    return config.get_ratios;
+}
+
 bool IsCacheBenchmarkFlag(std::string_view name) {
     return name == "policy" || name == "profile" || name == "cache-size" ||
            name == "key-space" || name == "value-size" || name == "requests" ||
@@ -270,6 +290,7 @@ std::expected<void, std::string> ParseOption(BenchmarkConfig& config,
         }
 
         config.get_ratios = std::move(parsed.value());
+        config.get_ratios_overridden = true;
         return {};
     }
     if (name == "ttl-ms") {
@@ -367,11 +388,12 @@ std::vector<BenchmarkScenario> MakeBenchmarkScenarios(const BenchmarkConfig& con
 
     for (PolicyType policy : config.policies) {
         for (WorkloadProfile profile : config.profiles) {
+            std::vector<size_t> get_ratios = GetRatiosForProfile(config, profile);
             for (size_t cache_size : config.cache_sizes) {
                 for (size_t key_space_size : config.key_space_sizes) {
                     for (size_t value_size : config.value_sizes) {
                         for (size_t request_count : config.request_counts) {
-                            for (size_t get_ratio : config.get_ratios) {
+                            for (size_t get_ratio : get_ratios) {
                                 for (auto ttl : config.ttls) {
                                     for (size_t read_threads : config.read_threads) {
                                         for (size_t write_threads : config.write_threads) {
@@ -460,7 +482,7 @@ void PrintBenchmarkConfigHelp() {
               << "  --key-space=N[,N...]\n"
               << "  --value-size=N[,N...]\n"
               << "  --requests=N[,N...]\n"
-              << "  --get-ratio=N[,N...] where 0 <= N <= 100\n"
+              << "  --get-ratio=N[,N...] where 0 <= N <= 100; defaults are profile-specific\n"
               << "  --ttl-ms=N[,N...] where 0 is disabled\n"
               << "  --read-threads=N[,N...]\n"
               << "  --write-threads=N[,N...]\n"
