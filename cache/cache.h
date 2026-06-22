@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <expected>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -13,11 +14,14 @@
 #include "policies/noeviction_policy.h"
 #include "policies/policy_base.h"
 
+using ExpiryIndex = std::multimap<std::chrono::steady_clock::time_point, std::string>;
+
 struct CacheEntry {
 public:
     std::string value;
     std::optional<std::chrono::steady_clock::time_point> ends = std::nullopt;
     size_t memory = 0;
+    std::optional<ExpiryIndex::iterator> expiry_it = std::nullopt;
 };
 
 struct CacheConfig {
@@ -53,6 +57,7 @@ private:
     CacheConfig config_;
     std::unique_ptr<EvictionPolicy> policy_;
     std::unordered_map<std::string, CacheEntry> data_;
+    ExpiryIndex expiry_;
 
     size_t used_memory_ = 0;
     CacheStats stats_;
@@ -79,18 +84,16 @@ private:
         return entry.ends.value() <= std::chrono::steady_clock::now();
     }
 
-    void DeleteOldKeys() {
-        auto it = data_.begin();
+    void ReclaimExpired() {
+        auto now = std::chrono::steady_clock::now();
 
-        while (it != data_.end()) {
-            if (IsExpired(it->second)) {
-                used_memory_ -= it->second.memory;
-                policy_->OnErase(it->first);
-                it = data_.erase(it);
-                ++stats_.expired;
-            } else {
-                ++it;
-            }
+        while (!expiry_.empty()) {
+            auto it = expiry_.begin();
+
+            if (it->first > now) { break; }
+
+            DeleteKey(it->second);
+            ++stats_.expired;
         }
     }
 
@@ -100,6 +103,9 @@ private:
         if (it == data_.end()) { return; }
 
         used_memory_ -= it->second.memory;
+
+        if (it->second.expiry_it.has_value()) { expiry_.erase(it->second.expiry_it.value()); }
+
         policy_->OnErase(key);
         data_.erase(it);
     }
@@ -119,6 +125,10 @@ private:
     }
 
     std::expected<void, std::string> MakeSpace(size_t new_memory) {
+        if (!NeedEviction(new_memory)) { return {}; }
+
+        ReclaimExpired();
+
         while (NeedEviction(new_memory)) {
             std::optional<std::string> victim = policy_->Victim();
 
@@ -148,7 +158,6 @@ public:
     std::expected<void, std::string> Put(const std::string& key, const std::string& value,
                                          std::optional<std::chrono::seconds> ttl = std::nullopt) {
         std::lock_guard<std::mutex> lock(mutex_);
-        DeleteOldKeys();
 
         if (key.empty()) { return std::unexpected("empty key"); }
 
@@ -172,6 +181,12 @@ public:
         if (it != data_.end()) {
             old_entry = std::move(it->second);
             used_memory_ -= old_entry.value().memory;
+
+            if (old_entry.value().expiry_it.has_value()) {
+                expiry_.erase(old_entry.value().expiry_it.value());
+                old_entry.value().expiry_it = std::nullopt;
+            }
+
             policy_->OnErase(key);
             data_.erase(it);
         }
@@ -181,6 +196,12 @@ public:
         if (!free_result.has_value()) {
             if (old_entry.has_value()) {
                 used_memory_ += old_entry.value().memory;
+
+                if (old_entry.value().ends.has_value()) {
+                    old_entry.value().expiry_it =
+                        expiry_.emplace(old_entry.value().ends.value(), key);
+                }
+
                 data_[key] = std::move(old_entry.value());
                 policy_->OnInsert(key);
             }
@@ -194,6 +215,7 @@ public:
 
         if (real_ttl.has_value()) {
             entry.ends = std::chrono::steady_clock::now() + real_ttl.value();
+            entry.expiry_it = expiry_.emplace(entry.ends.value(), key);
         }
 
         data_[key] = std::move(entry);
@@ -234,6 +256,7 @@ public:
     void Clear() {
         std::lock_guard<std::mutex> lock(mutex_);
         data_.clear();
+        expiry_.clear();
         used_memory_ = 0;
         policy_->Clear();
     }
