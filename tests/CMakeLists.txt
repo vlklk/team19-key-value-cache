@@ -11,6 +11,8 @@ FetchContent_MakeAvailable(googletest)
 add_executable(cache_tests
     single_thread_tests.cpp
     concurrency_tests.cpp
+    txt_database_tests.cpp
+    cache_simulator_tests.cpp
 )
 
 target_link_libraries(cache_tests PRIVATE cache GTest::gtest_main)
