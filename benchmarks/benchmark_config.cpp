@@ -27,6 +27,7 @@ BenchmarkConfig DefaultBenchmarkConfig() {
     config.key_space_sizes = {10000};
     config.value_sizes = {64};
     config.request_counts = {10000};
+    config.durations = {std::chrono::milliseconds{0}};
     config.get_ratios = {70};
     config.ttls = {std::chrono::milliseconds{0}};
     config.read_threads = {1};
@@ -116,6 +117,18 @@ std::expected<std::vector<std::chrono::milliseconds>, std::string> ParseTtlList(
     return ParseList<std::chrono::milliseconds>(value, [](std::string_view part)
         -> std::expected<std::chrono::milliseconds, std::string> {
         auto parsed = ParseSize(part, "ttl-ms", true);
+
+        if (!parsed.has_value()) { return std::unexpected(parsed.error()); }
+
+        return std::chrono::milliseconds{parsed.value()};
+    });
+}
+
+std::expected<std::vector<std::chrono::milliseconds>, std::string> ParseDurationList(
+    std::string_view value) {
+    return ParseList<std::chrono::milliseconds>(value, [](std::string_view part)
+        -> std::expected<std::chrono::milliseconds, std::string> {
+        auto parsed = ParseSize(part, "duration-ms", true);
 
         if (!parsed.has_value()) { return std::unexpected(parsed.error()); }
 
@@ -222,8 +235,9 @@ std::vector<size_t> GetRatiosForProfile(const BenchmarkConfig& config, WorkloadP
 bool IsCacheBenchmarkFlag(std::string_view name) {
     return name == "policy" || name == "profile" || name == "cache-size" ||
            name == "key-space" || name == "value-size" || name == "requests" ||
-           name == "get-ratio" || name == "ttl-ms" || name == "read-threads" ||
-           name == "write-threads" || name == "runs" || name == "seed";
+           name == "duration-ms" || name == "get-ratio" || name == "ttl-ms" ||
+           name == "read-threads" || name == "write-threads" || name == "runs" ||
+           name == "seed";
 }
 
 std::expected<void, std::string> ParseOption(BenchmarkConfig& config, 
@@ -275,6 +289,14 @@ std::expected<void, std::string> ParseOption(BenchmarkConfig& config,
             return std::unexpected(parsed.error()); 
         }
         config.request_counts = std::move(parsed.value());
+        return {};
+    }
+    if (name == "duration-ms") {
+        auto parsed = ParseDurationList(value);
+        if (!parsed.has_value()) {
+            return std::unexpected(parsed.error());
+        }
+        config.durations = std::move(parsed.value());
         return {};
     }
     if (name == "get-ratio") {
@@ -393,23 +415,26 @@ std::vector<BenchmarkScenario> MakeBenchmarkScenarios(const BenchmarkConfig& con
                 for (size_t key_space_size : config.key_space_sizes) {
                     for (size_t value_size : config.value_sizes) {
                         for (size_t request_count : config.request_counts) {
-                            for (size_t get_ratio : get_ratios) {
-                                for (auto ttl : config.ttls) {
-                                    for (size_t read_threads : config.read_threads) {
-                                        for (size_t write_threads : config.write_threads) {
-                                            scenarios.push_back(BenchmarkScenario{
-                                                policy,
-                                                profile,
-                                                cache_size,
-                                                key_space_size,
-                                                value_size,
-                                                request_count,
-                                                get_ratio,
-                                                ttl,
-                                                read_threads,
-                                                write_threads,
-                                                config.seed,
-                                            });
+                            for (auto duration : config.durations) {
+                                for (size_t get_ratio : get_ratios) {
+                                    for (auto ttl : config.ttls) {
+                                        for (size_t read_threads : config.read_threads) {
+                                            for (size_t write_threads : config.write_threads) {
+                                                scenarios.push_back(BenchmarkScenario{
+                                                    policy,
+                                                    profile,
+                                                    cache_size,
+                                                    key_space_size,
+                                                    value_size,
+                                                    request_count,
+                                                    duration,
+                                                    get_ratio,
+                                                    ttl,
+                                                    read_threads,
+                                                    write_threads,
+                                                    config.seed,
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -433,6 +458,7 @@ std::string BuildBenchmarkName(const BenchmarkScenario& scenario) {
     out << "/keys:" << scenario.key_space_size;
     out << "/value:" << scenario.value_size;
     out << "/requests:" << scenario.request_count;
+    out << "/duration_ms:" << scenario.duration.count();
     out << "/get:" << scenario.get_ratio;
     out << "/ttl_ms:" << scenario.ttl.count();
     out << "/read_threads:" << scenario.read_threads;
@@ -481,7 +507,8 @@ void PrintBenchmarkConfigHelp() {
               << "  --cache-size=N[,N...]\n"
               << "  --key-space=N[,N...]\n"
               << "  --value-size=N[,N...]\n"
-              << "  --requests=N[,N...]\n"
+              << "  --requests=N[,N...] fixed operation count, or pattern length when duration-ms > 0\n"
+              << "  --duration-ms=N[,N...] where 0 disables duration mode\n"
               << "  --get-ratio=N[,N...] where 0 <= N <= 100; defaults are profile-specific\n"
               << "  --ttl-ms=N[,N...] where 0 is disabled\n"
               << "  --read-threads=N[,N...]\n"

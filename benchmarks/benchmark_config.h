@@ -25,6 +25,7 @@ struct BenchmarkConfig {
     std::vector<size_t> key_space_sizes;
     std::vector<size_t> value_sizes;
     std::vector<size_t> request_counts;
+    std::vector<std::chrono::milliseconds> durations;
     std::vector<size_t> get_ratios;
     std::vector<std::chrono::milliseconds> ttls;
     std::vector<size_t> read_threads;
@@ -42,6 +43,7 @@ struct BenchmarkScenario {
     size_t key_space_size = 0;
     size_t value_size = 0;
     size_t request_count = 0;
+    std::chrono::milliseconds duration{0};
     size_t get_ratio = 0;
     std::chrono::milliseconds ttl{0};
     size_t read_threads = 0;

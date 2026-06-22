@@ -78,6 +78,19 @@ std::vector<double> MergeLatencies(const std::vector<std::vector<double>>& per_t
     return result;
 }
 
+CacheStats WorkloadStats(const CacheStats& before, const CacheStats& after) {
+    CacheStats result;
+    result.hits = after.hits - before.hits;
+    result.misses = after.misses - before.misses;
+    result.puts = after.puts - before.puts;
+    result.erases = after.erases - before.erases;
+    result.evictions = after.evictions - before.evictions;
+    result.expired = after.expired - before.expired;
+    result.used_memory = after.used_memory;
+    result.size = after.size;
+    return result;
+}
+
 void WarmupCache(Cache& cache, const BenchmarkScenario& scenario, 
     const std::string& value, std::optional<std::chrono::seconds> ttl) {
 
@@ -91,6 +104,7 @@ void WarmupCache(Cache& cache, const BenchmarkScenario& scenario,
 void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
     CacheStats stats;
     size_t put_errors = 0;
+    size_t processed_operations = 0;
     std::vector<double> get_latencies_ns;
 
     for (auto _ : state) {
@@ -126,12 +140,16 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
         }
 
         WarmupCache(*cache, scenario, value, ttl);
+        CacheStats baseline_stats = cache->Stats();
 
         std::atomic<bool> start{false};
         std::atomic<size_t> ready_count{0};
         std::atomic<size_t> next_get{0};
         std::atomic<size_t> next_put{0};
         std::atomic<size_t> current_put_errors{0};
+        std::atomic<size_t> current_processed_operations{0};
+        const bool duration_mode = scenario.duration > std::chrono::milliseconds::zero();
+        std::chrono::steady_clock::time_point stop_at;
         std::vector<std::vector<double>> per_reader_latencies(scenario.read_threads);
         std::vector<std::thread> workers;
         workers.reserve(scenario.read_threads + scenario.write_threads);
@@ -146,15 +164,22 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
         for (size_t reader_id = 0; reader_id < scenario.read_threads; ++reader_id) {
             workers.emplace_back([&, reader_id] {
                 wait_for_start();
+                if (partitioned.gets.empty()) {
+                    return;
+                }
 
                 auto& latencies = per_reader_latencies[reader_id];
                 latencies.reserve(partitioned.gets.size() / scenario.read_threads + 1);
 
                 while (true) {
                     size_t index = next_get.fetch_add(1, std::memory_order_relaxed);
-                    if (index >= partitioned.gets.size()) {
+                    if (!duration_mode && index >= partitioned.gets.size()) {
                         break;
                     }
+                    if (duration_mode && std::chrono::steady_clock::now() >= stop_at) {
+                        break;
+                    }
+                    index %= partitioned.gets.size();
 
                     const Operation& operation = *partitioned.gets[index];
                     auto started = std::chrono::steady_clock::now();
@@ -163,6 +188,7 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
                     benchmark::DoNotOptimize(result);
                     latencies.push_back(static_cast<double>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started).count()));
+                    current_processed_operations.fetch_add(1, std::memory_order_relaxed);
                 }
             });
         }
@@ -170,16 +196,24 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
         for (size_t writer_id = 0; writer_id < scenario.write_threads; ++writer_id) {
             workers.emplace_back([&] {
                 wait_for_start();
+                if (partitioned.puts.empty()) {
+                    return;
+                }
 
                 while (true) {
                     size_t index = next_put.fetch_add(1, std::memory_order_relaxed);
-                    if (index >= partitioned.puts.size()) {
+                    if (!duration_mode && index >= partitioned.puts.size()) {
                         break;
                     }
+                    if (duration_mode && std::chrono::steady_clock::now() >= stop_at) {
+                        break;
+                    }
+                    index %= partitioned.puts.size();
 
                     const Operation& operation = *partitioned.puts[index];
                     auto result = cache->Put(operation.key, value, ttl);
                     benchmark::DoNotOptimize(result);
+                    current_processed_operations.fetch_add(1, std::memory_order_relaxed);
 
                     if (!result.has_value()) {
                         current_put_errors.fetch_add(1, std::memory_order_relaxed);
@@ -194,6 +228,9 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
 
         state.ResumeTiming();
 
+        if (duration_mode) {
+            stop_at = std::chrono::steady_clock::now() + scenario.duration;
+        }
         start.store(true, std::memory_order_release);
         for (std::thread& worker : workers) {
             worker.join();
@@ -201,13 +238,13 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
 
         state.PauseTiming();
         get_latencies_ns = MergeLatencies(per_reader_latencies);
-        stats = cache->Stats();
+        stats = WorkloadStats(baseline_stats, cache->Stats());
         put_errors = current_put_errors.load(std::memory_order_relaxed);
+        processed_operations += current_processed_operations.load(std::memory_order_relaxed);
         state.ResumeTiming();
     }
 
-    state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *
-                            static_cast<int64_t>(scenario.request_count));
+    state.SetItemsProcessed(static_cast<int64_t>(processed_operations));
     state.counters["hits"] = static_cast<double>(stats.hits);
     state.counters["misses"] = static_cast<double>(stats.misses);
     state.counters["hit_ratio"] = stats.HitRatio();
