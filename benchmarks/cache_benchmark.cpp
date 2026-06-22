@@ -208,10 +208,15 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
 
     state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *
                             static_cast<int64_t>(scenario.request_count));
+    state.counters["hits"] = static_cast<double>(stats.hits);
+    state.counters["misses"] = static_cast<double>(stats.misses);
     state.counters["hit_ratio"] = stats.HitRatio();
     state.counters["get_p50_ns"] = PercentileNs(get_latencies_ns, 0.50);
     state.counters["get_p99_ns"] = PercentileNs(get_latencies_ns, 0.99);
+    state.counters["puts"] = static_cast<double>(stats.puts);
     state.counters["evictions"] = static_cast<double>(stats.evictions);
+    state.counters["expired"] = static_cast<double>(stats.expired);
+    state.counters["cache_size"] = static_cast<double>(stats.size);
     state.counters["memory_estimate"] = static_cast<double>(stats.used_memory);
     state.counters["put_errors"] = static_cast<double>(put_errors);
 }
