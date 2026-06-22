@@ -18,6 +18,10 @@
 namespace {
 
 std::optional<std::chrono::seconds> ToCacheTtl(std::chrono::milliseconds ttl) {
+    if (ttl == std::chrono::milliseconds::zero()) {
+        return std::nullopt;
+    }
+
     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(ttl);
     if (seconds.count() == 0) {
         seconds = std::chrono::seconds{1};
