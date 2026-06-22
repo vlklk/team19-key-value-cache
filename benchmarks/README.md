@@ -36,11 +36,18 @@ benchmarks/run_experiments.sh quick
 benchmarks/run_experiments.sh full
 ```
 
-The runner writes JSON output to `benchmark-results/` by default. Override paths
-with environment variables:
+The runner writes JSON and CSV output to `benchmark-results/` by default.
+Override paths with environment variables:
 
 ```bash
 OUT_DIR=/tmp/cache-benchmarks BUILD_DIR=build JOBS=8 benchmarks/run_experiments.sh quick
+```
+
+Convert existing Google Benchmark JSON output manually:
+
+```bash
+benchmarks/summarize_results.py benchmark-results/cache_benchmarks_quick.json \
+  --output benchmark-results/cache_benchmarks_quick.csv
 ```
 
 ## Main Options

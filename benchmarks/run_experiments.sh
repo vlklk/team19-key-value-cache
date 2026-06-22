@@ -86,3 +86,7 @@ cmake --build "$BUILD_DIR" --target cache_benchmarks -j "$JOBS"
     "${ARGS[@]}" \
     --benchmark_out="$OUT_DIR/cache_benchmarks_${MODE}.json" \
     --benchmark_out_format=json
+
+python3 "$ROOT_DIR/benchmarks/summarize_results.py" \
+    "$OUT_DIR/cache_benchmarks_${MODE}.json" \
+    --output "$OUT_DIR/cache_benchmarks_${MODE}.csv"
