@@ -1,0 +1,5 @@
+apple=red
+banana=yellow
+cat=meow
+dog=woof
+language=cpp
