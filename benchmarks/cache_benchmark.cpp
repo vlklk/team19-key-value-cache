@@ -1,5 +1,6 @@
 #include <benchmark/benchmark.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -7,6 +8,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #include "benchmark_config.h"
@@ -34,6 +36,42 @@ double PercentileNs(std::vector<double> values, double percentile) {
     index = std::min(index, values.size() - 1);
 
     return values[index];
+}
+
+struct PartitionedOperations {
+    std::vector<const Operation*> gets;
+    std::vector<const Operation*> puts;
+};
+
+PartitionedOperations PartitionOperations(const std::vector<Operation>& operations) {
+    PartitionedOperations result;
+    result.gets.reserve(operations.size());
+    result.puts.reserve(operations.size());
+
+    for (const Operation& operation : operations) {
+        if (operation.type == OperationType::Get) {
+            result.gets.push_back(&operation);
+        } else {
+            result.puts.push_back(&operation);
+        }
+    }
+
+    return result;
+}
+
+std::vector<double> MergeLatencies(const std::vector<std::vector<double>>& per_thread_latencies) {
+    size_t total_count = 0;
+    for (const auto& latencies : per_thread_latencies) {
+        total_count += latencies.size();
+    }
+
+    std::vector<double> result;
+    result.reserve(total_count);
+    for (const auto& latencies : per_thread_latencies) {
+        result.insert(result.end(), latencies.begin(), latencies.end());
+    }
+
+    return result;
 }
 
 void WarmupCache(Cache& cache, const BenchmarkScenario& scenario, 
@@ -69,35 +107,98 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
         std::string value(scenario.value_size, 'x');
         auto ttl = ToCacheTtl(scenario.ttl);
         std::vector<Operation> operations = GenerateWorkload(scenario);
+        PartitionedOperations partitioned = PartitionOperations(operations);
         get_latencies_ns.clear();
-        get_latencies_ns.reserve(operations.size());
+
+        if (!partitioned.gets.empty() && scenario.read_threads == 0) {
+            state.ResumeTiming();
+            state.SkipWithError("get operations require --read-threads > 0");
+            return;
+        }
+        if (!partitioned.puts.empty() && scenario.write_threads == 0) {
+            state.ResumeTiming();
+            state.SkipWithError("put operations require --write-threads > 0");
+            return;
+        }
 
         WarmupCache(*cache, scenario, value, ttl);
 
+        std::atomic<bool> start{false};
+        std::atomic<size_t> ready_count{0};
+        std::atomic<size_t> next_get{0};
+        std::atomic<size_t> next_put{0};
+        std::atomic<size_t> current_put_errors{0};
+        std::vector<std::vector<double>> per_reader_latencies(scenario.read_threads);
+        std::vector<std::thread> workers;
+        workers.reserve(scenario.read_threads + scenario.write_threads);
+
+        auto wait_for_start = [&]() {
+            ready_count.fetch_add(1, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        };
+
+        for (size_t reader_id = 0; reader_id < scenario.read_threads; ++reader_id) {
+            workers.emplace_back([&, reader_id] {
+                wait_for_start();
+
+                auto& latencies = per_reader_latencies[reader_id];
+                latencies.reserve(partitioned.gets.size() / scenario.read_threads + 1);
+
+                while (true) {
+                    size_t index = next_get.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= partitioned.gets.size()) {
+                        break;
+                    }
+
+                    const Operation& operation = *partitioned.gets[index];
+                    auto started = std::chrono::steady_clock::now();
+                    auto result = cache->Get(operation.key);
+                    auto finished = std::chrono::steady_clock::now();
+                    benchmark::DoNotOptimize(result);
+                    latencies.push_back(static_cast<double>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started).count()));
+                }
+            });
+        }
+
+        for (size_t writer_id = 0; writer_id < scenario.write_threads; ++writer_id) {
+            workers.emplace_back([&] {
+                wait_for_start();
+
+                while (true) {
+                    size_t index = next_put.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= partitioned.puts.size()) {
+                        break;
+                    }
+
+                    const Operation& operation = *partitioned.puts[index];
+                    auto result = cache->Put(operation.key, value, ttl);
+                    benchmark::DoNotOptimize(result);
+
+                    if (!result.has_value()) {
+                        current_put_errors.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            });
+        }
+
+        while (ready_count.load(std::memory_order_acquire) < workers.size()) {
+            std::this_thread::yield();
+        }
+
         state.ResumeTiming();
 
-        size_t current_put_errors = 0;
-        for (const Operation& operation : operations) {
-            if (operation.type == OperationType::Get) {
-                auto started = std::chrono::steady_clock::now();
-                auto result = cache->Get(operation.key);
-                auto finished = std::chrono::steady_clock::now();
-                benchmark::DoNotOptimize(result);
-                get_latencies_ns.push_back(static_cast<double>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started).count()));
-            } else {
-                auto result = cache->Put(operation.key, value, ttl);
-                benchmark::DoNotOptimize(result);
-
-                if (!result.has_value()) {
-                    ++current_put_errors;
-                }
-            }
+        start.store(true, std::memory_order_release);
+        for (std::thread& worker : workers) {
+            worker.join();
         }
 
         state.PauseTiming();
+        get_latencies_ns = MergeLatencies(per_reader_latencies);
         stats = cache->Stats();
-        put_errors = current_put_errors;
+        put_errors = current_put_errors.load(std::memory_order_relaxed);
         state.ResumeTiming();
     }
 
