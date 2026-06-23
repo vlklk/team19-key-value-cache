@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <numeric>
 #include <random>
 #include <vector>
 
@@ -9,6 +11,16 @@ namespace {
 
 std::string MakeKey(size_t index) {
     return "key:" + std::to_string(index);
+}
+
+std::vector<size_t> MakeKeyPermutation(size_t key_space_size, uint64_t seed) {
+    std::vector<size_t> permutation(key_space_size);
+    std::iota(permutation.begin(), permutation.end(), size_t{0});
+
+    std::mt19937_64 permutation_generator(seed ^ 0x9E3779B97F4A7C15ULL);
+    std::shuffle(permutation.begin(), permutation.end(), permutation_generator);
+
+    return permutation;
 }
 
 size_t HotKeyCount(const BenchmarkScenario& scenario) {
@@ -84,13 +96,15 @@ std::vector<Operation> GenerateWorkload(const BenchmarkScenario& scenario) {
     std::mt19937_64 generator(scenario.seed);
     std::vector<double> zipf_weights = MakeZipfWeights(scenario.key_space_size);
     std::discrete_distribution<size_t> zipf_distribution(zipf_weights.begin(), zipf_weights.end());
+    std::vector<size_t> key_permutation =
+        MakeKeyPermutation(scenario.key_space_size, scenario.seed);
     size_t get_ratio = scenario.get_ratio;
 
     for (size_t i = 0; i < scenario.request_count; ++i) {
-        size_t key_index = KeyForOperation(generator, zipf_distribution, scenario, i);
+        size_t key_rank = KeyForOperation(generator, zipf_distribution, scenario, i);
         operations.push_back(Operation{
             MakeOperationType(i, get_ratio),
-            MakeKey(key_index),
+            MakeKey(key_permutation[key_rank]),
         });
     }
 

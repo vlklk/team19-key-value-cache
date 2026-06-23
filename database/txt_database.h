@@ -13,15 +13,15 @@
 
 class TxtDatabase {
 public:
-    explicit TxtDatabase(std::filesystem::path path) : path_(std::move(path)) {}
+
+    explicit TxtDatabase(std::filesystem::path path) : data_(LoadFromFile(path)) {}
 
     std::optional<std::string> Get(const std::string& key) const {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        auto data = LoadAll();
-        auto it = data.find(key);
+        auto it = data_.find(key);
 
-        if (it == data.end()) { return std::nullopt; }
+        if (it == data_.end()) { return std::nullopt; }
 
         return it->second;
     }
@@ -39,34 +39,28 @@ public:
             return std::unexpected("invalid value");
         }
 
-        auto data = LoadAll();
-        data[key] = value;
+        data_[key] = value;
 
-        return SaveAll(data);
+        return {};
     }
 
     bool Erase(const std::string& key) {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        auto data = LoadAll();
-
-        if (data.erase(key) == 0) { return false; }
-
-        auto result = SaveAll(data);
-
-        return result.has_value();
+        return data_.erase(key) != 0;
     }
 
     size_t Size() const {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        return LoadAll().size();
+        return data_.size();
     }
 
 private:
-    std::unordered_map<std::string, std::string> LoadAll() const {
+    static std::unordered_map<std::string, std::string> LoadFromFile(
+        const std::filesystem::path& path) {
         std::unordered_map<std::string, std::string> data;
-        std::ifstream input(path_);
+        std::ifstream input(path);
 
         if (!input.is_open()) { return data; }
 
@@ -88,34 +82,6 @@ private:
         return data;
     }
 
-    std::expected<void, std::string> SaveAll(
-        const std::unordered_map<std::string, std::string>& data) const {
-        auto parent = path_.parent_path();
-
-        if (!parent.empty()) {
-            std::error_code error;
-            std::filesystem::create_directories(parent, error);
-
-            if (error) { return std::unexpected(error.message()); }
-        }
-
-        std::ofstream output(path_, std::ios::trunc);
-
-        if (!output.is_open()) {
-            return std::unexpected("cannot open file");
-        }
-
-        for (const auto& [key, value] : data) {
-            output << key << '=' << value << '\n';
-        }
-
-        if (!output.good()) {
-            return std::unexpected("cannot write file");
-        }
-
-        return {};
-    }
-
-    std::filesystem::path path_;
+    std::unordered_map<std::string, std::string> data_;
     mutable std::mutex mutex_;
 };
