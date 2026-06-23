@@ -1,7 +1,15 @@
-# Cache Benchmark
+# Cache Request Simulator Benchmark
 
 The benchmark binary compares LRU, LFU, Random, and Noeviction cache policies on
 Uniform, Zipf, Sequential Loop, Read-Heavy, Write-Heavy, and Burst workloads.
+
+The benchmark measures the `CacheRequestSimulator`, not raw `Cache::Get` / `Cache::Put` calls.
+Each read operation calls `CacheRequestSimulator::Get`. On cache miss the simulator reads the
+value from a temporary `TxtDatabase` and inserts it into the cache. Each write operation calls
+`CacheRequestSimulator::Set`, which writes to the database and then updates the cache.
+
+The temporary database is generated before timing starts and contains all synthetic keys from the
+configured key space. Database creation and cache warmup are excluded from benchmark timing.
 
 ## Build
 
@@ -68,6 +76,10 @@ benchmarks/summarize_results.py benchmark-results/cache_benchmarks_quick.json \
 
 ## Report Metrics
 
-The benchmark emits counters for hit ratio, throughput, p50/p99 Get latency,
-evictions, memory estimate, final cache size, hits, misses, puts, expired items,
-and put errors.
+The benchmark emits simulator-level counters for cache hits, cache misses, simulator hit ratio,
+database hits, database misses, successful writes, Set errors, and null Get results. It also reports
+cache-level state required by the task: eviction count, expired item count, final cache size, and
+memory estimate.
+
+`get_p50_ns` and `get_p99_ns` are latencies of `CacheRequestSimulator::Get`, so a miss includes
+simulator fill-on-miss work: cache lookup, database lookup, and cache insertion attempt.
