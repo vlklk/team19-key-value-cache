@@ -38,6 +38,7 @@ METRIC_COLUMNS = [
     "puts",
     "writes",
     "erases",
+    "cache_store_errors",
     "database_hits",
     "database_misses",
     "expired",

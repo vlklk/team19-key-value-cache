@@ -155,3 +155,55 @@ TEST(CacheRequestSimulator, EraseRemovesFromTxtDatabaseAndCache) {
 
     std::filesystem::remove(path);
 }
+
+TEST(CacheRequestSimulator, DatabaseHitReturnsValueEvenIfCacheCannotStore) {
+    auto path = MakeTempFile("cache_simulator_noeviction_get.txt");
+    WriteFile(path, "warm=value\ncold=value\n");
+
+    CacheConfig config = Config(PolicyType::NoEviction);
+    config.max_count = 1;
+    auto cache = MakeOrDie(config);
+    TxtDatabase database(path);
+    CacheRequestSimulator simulator(*cache, database);
+
+    auto warm = simulator.Get("warm");
+    auto cold = simulator.Get("cold");
+
+    ASSERT_TRUE(warm.has_value());
+    ASSERT_TRUE(cold.has_value());
+    EXPECT_EQ(*cold, "value");
+    EXPECT_EQ(cache->Size(), 1u);
+
+    auto stats = simulator.Stats();
+    EXPECT_EQ(stats.database_hits, 2u);
+    EXPECT_EQ(stats.cache_store_errors, 1u);
+
+    std::filesystem::remove(path);
+}
+
+TEST(CacheRequestSimulator, SetSucceedsWhenDatabaseWritesButCacheCannotStore) {
+    auto path = MakeTempFile("cache_simulator_noeviction_set.txt");
+
+    CacheConfig config = Config(PolicyType::NoEviction);
+    config.max_count = 1;
+    auto cache = MakeOrDie(config);
+    TxtDatabase database(path);
+    CacheRequestSimulator simulator(*cache, database);
+
+    auto first = simulator.Set("first", "value");
+    auto second = simulator.Set("second", "value");
+
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+
+    auto stored = database.Get("second");
+    ASSERT_TRUE(stored.has_value());
+    EXPECT_EQ(*stored, "value");
+    EXPECT_EQ(cache->Size(), 1u);
+
+    auto stats = simulator.Stats();
+    EXPECT_EQ(stats.writes, 2u);
+    EXPECT_EQ(stats.cache_store_errors, 1u);
+
+    std::filesystem::remove(path);
+}

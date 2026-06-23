@@ -18,6 +18,7 @@ public:
     size_t database_misses = 0;
     size_t writes = 0;
     size_t erases = 0;
+    size_t cache_store_errors = 0;
 
     double HitRatio() const {
         size_t count = cache_hits + cache_misses;
@@ -54,8 +55,9 @@ public:
         AddDatabaseHit();
 
         auto result = cache_.Put(key, *stored);
-
-        if (!result.has_value()) { return std::nullopt; }
+        if (!result.has_value()) {
+            AddCacheStoreError();
+        }
 
         return stored;
     }
@@ -68,9 +70,8 @@ public:
         }
 
         auto cache_result = cache_.Put(key, value);
-
         if (!cache_result.has_value()) {
-            return std::unexpected(cache_result.error());
+            AddCacheStoreError();
         }
 
         AddWrite();
@@ -122,6 +123,11 @@ private:
     void AddErase() {
         std::lock_guard<std::mutex> lock(mutex_);
         ++stats_.erases;
+    }
+
+    void AddCacheStoreError() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++stats_.cache_store_errors;
     }
 
     Cache& cache_;

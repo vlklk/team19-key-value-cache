@@ -42,13 +42,13 @@ size_t UniformKey(std::mt19937_64& generator, size_t key_space_size) {
     return distribution(generator);
 }
 
-size_t BurstKey(std::mt19937_64& generator, const BenchmarkScenario& scenario, size_t index) {
-    constexpr size_t burst_size = 100;
-    constexpr size_t hot_part = 80;
+size_t BurstKey(std::mt19937_64& generator, const BenchmarkScenario& scenario) {
+    constexpr size_t hot_probability_percent = 80;
 
+    std::uniform_int_distribution<size_t> hot_or_cold(0, 99);
     size_t hot_key_count = HotKeyCount(scenario);
 
-    if (index % burst_size < hot_part) {
+    if (hot_or_cold(generator) < hot_probability_percent) {
         std::uniform_int_distribution<size_t> distribution(0, hot_key_count - 1);
         return distribution(generator);
     }
@@ -69,7 +69,7 @@ size_t KeyForOperation(std::mt19937_64& generator,
         case WorkloadProfile::SequentialLoop:
             return index % scenario.key_space_size;
         case WorkloadProfile::Burst:
-            return BurstKey(generator, scenario, index);
+            return BurstKey(generator, scenario);
     }
 
     return 0;

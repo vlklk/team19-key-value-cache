@@ -14,7 +14,7 @@ configured key space. Database creation and cache warmup are excluded from bench
 ## Build
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCACHE_BUILD_TESTS=OFF
 cmake --build build --target cache_benchmarks -j 4
 ```
 
@@ -28,7 +28,7 @@ cmake --build build --target cache_benchmarks -j 4
   --key-space=256 \
   --value-size=32 \
   --requests=256 \
-  --duration-ms=20 \
+  --duration-ms=0 \
   --ttl-ms=0 \
   --read-threads=2 \
   --write-threads=1 \
@@ -51,12 +51,32 @@ Override paths with environment variables:
 OUT_DIR=/tmp/cache-benchmarks BUILD_DIR=build JOBS=8 benchmarks/run_experiments.sh quick
 ```
 
+The runner uses fixed request-count mode by default:
+
+```text
+--duration-ms=0
+```
+
+That is intentional for the simulator benchmark. A simulator miss touches `TxtDatabase`, so
+fixed-duration mode can execute very different numbers of operations for different profiles.
+Fixed request-count mode makes policies and profiles easier to compare because each scenario gets
+the same number of generated operations.
+
 Convert existing Google Benchmark JSON output manually:
 
 ```bash
 benchmarks/summarize_results.py benchmark-results/cache_benchmarks_quick.json \
   --output benchmark-results/cache_benchmarks_quick.csv
 ```
+
+## Presets
+
+The script presets are intentionally smaller than a raw cache benchmark because `TxtDatabase::Get`
+and `TxtDatabase::Set` work through a text file.
+
+- `smoke`: one tiny LRU/uniform scenario, for checking that build and output work.
+- `quick`: all policies and profiles, one cache size, fixed 1000 operations per scenario.
+- `full`: all policies and profiles, two cache sizes, fixed 3000 operations per scenario.
 
 ## Main Options
 
@@ -83,3 +103,14 @@ memory estimate.
 
 `get_p50_ns` and `get_p99_ns` are latencies of `CacheRequestSimulator::Get`, so a miss includes
 simulator fill-on-miss work: cache lookup, database lookup, and cache insertion attempt.
+
+## Notes on Noeviction and Burst
+
+`Noeviction` may reject cache insertions after the cache is full. In the simulator this is treated as a
+cache-store failure, not as an application-level read/write failure: if `TxtDatabase` returns a value,
+`CacheRequestSimulator::Get` still returns that value even when the cache cannot store it. These
+failures are reported as `cache_store_errors` / `put_errors`.
+
+The Burst profile chooses the operation type and the hot/cold key independently. This avoids the
+old artifact where all `Get` operations accidentally targeted only the hot set because both the
+operation type and hot/cold selection were based on `index % 100`.
