@@ -144,6 +144,7 @@ CacheRequestSimulatorStats WorkloadSimulatorStats(const CacheRequestSimulatorSta
     result.database_misses = after.database_misses - before.database_misses;
     result.writes = after.writes - before.writes;
     result.erases = after.erases - before.erases;
+    result.cache_store_errors = after.cache_store_errors - before.cache_store_errors;
     return result;
 }
 
@@ -343,14 +344,15 @@ void BMSimulatorWorkload(benchmark::State& state, BenchmarkScenario scenario) {
     state.counters["database_hits"] = static_cast<double>(simulator_stats.database_hits);
     state.counters["database_misses"] = static_cast<double>(simulator_stats.database_misses);
     state.counters["writes"] = static_cast<double>(simulator_stats.writes);
-    state.counters["puts"] = static_cast<double>(simulator_stats.writes);
+    state.counters["puts"] = static_cast<double>(cache_stats.puts);
+    state.counters["cache_store_errors"] = static_cast<double>(simulator_stats.cache_store_errors);
     state.counters["erases"] = static_cast<double>(simulator_stats.erases);
     state.counters["evictions"] = static_cast<double>(cache_stats.evictions);
     state.counters["expired"] = static_cast<double>(cache_stats.expired);
     state.counters["cache_size"] = static_cast<double>(cache_stats.size);
     state.counters["memory_estimate"] = static_cast<double>(cache_stats.used_memory);
     state.counters["set_errors"] = static_cast<double>(set_errors);
-    state.counters["put_errors"] = static_cast<double>(set_errors);
+    state.counters["put_errors"] = static_cast<double>(simulator_stats.cache_store_errors);
     state.counters["get_null_results"] = static_cast<double>(get_null_results);
 }
 
