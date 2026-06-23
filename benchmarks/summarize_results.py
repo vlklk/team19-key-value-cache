@@ -36,8 +36,14 @@ METRIC_COLUMNS = [
     "hits",
     "misses",
     "puts",
+    "writes",
+    "erases",
+    "database_hits",
+    "database_misses",
     "expired",
     "put_errors",
+    "set_errors",
+    "get_null_results",
 ]
 
 

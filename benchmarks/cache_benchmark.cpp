@@ -1,18 +1,26 @@
 #include <benchmark/benchmark.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <expected>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
 #include <thread>
 #include <utility>
+#include <filesystem>
 #include <vector>
+
 #include "benchmark_config.h"
 #include "cache/cache.h"
+#include "database/txt_database.h"
+#include "simulator/cache_request_simulator.h"
 #include "workload.h"
 
 namespace {
@@ -41,6 +49,55 @@ double PercentileNs(std::vector<double> values, double percentile) {
 
     return values[index];
 }
+
+std::string MakeKey(size_t index) {
+    return "key:" + std::to_string(index);
+}
+
+std::expected<std::filesystem::path, std::string> CreateDatabaseFile(
+    const BenchmarkScenario& scenario, const std::string& value) {
+    static std::atomic<size_t> database_id{0};
+
+    std::error_code error;
+    std::filesystem::path directory = std::filesystem::temp_directory_path(error);
+    if (error) {
+        return std::unexpected(error.message());
+    }
+
+    std::filesystem::path path = directory / (
+        "cache_benchmark_simulator_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+        "_" + std::to_string(database_id.fetch_add(1, std::memory_order_relaxed)) +
+        ".txt");
+
+    std::ofstream output(path, std::ios::trunc);
+    if (!output.is_open()) {
+        return std::unexpected("cannot create simulator database file: " + path.string());
+    }
+
+    for (size_t i = 0; i < scenario.key_space_size; ++i) {
+        output << MakeKey(i) << '=' << value << '\n';
+    }
+
+    if (!output.good()) {
+        return std::unexpected("cannot write simulator database file: " + path.string());
+    }
+
+    return path;
+}
+
+struct DatabaseFileGuard {
+    explicit DatabaseFileGuard(std::filesystem::path path) : path(std::move(path)) {}
+
+    ~DatabaseFileGuard() {
+        if (!path.empty()) {
+            std::error_code error;
+            std::filesystem::remove(path, error);
+        }
+    }
+
+    std::filesystem::path path;
+};
 
 struct PartitionedOperations {
     std::vector<const Operation*> gets;
@@ -78,7 +135,19 @@ std::vector<double> MergeLatencies(const std::vector<std::vector<double>>& per_t
     return result;
 }
 
-CacheStats WorkloadStats(const CacheStats& before, const CacheStats& after) {
+CacheRequestSimulatorStats WorkloadSimulatorStats(const CacheRequestSimulatorStats& before,
+                                                   const CacheRequestSimulatorStats& after) {
+    CacheRequestSimulatorStats result;
+    result.cache_hits = after.cache_hits - before.cache_hits;
+    result.cache_misses = after.cache_misses - before.cache_misses;
+    result.database_hits = after.database_hits - before.database_hits;
+    result.database_misses = after.database_misses - before.database_misses;
+    result.writes = after.writes - before.writes;
+    result.erases = after.erases - before.erases;
+    return result;
+}
+
+CacheStats WorkloadCacheStats(const CacheStats& before, const CacheStats& after) {
     CacheStats result;
     result.hits = after.hits - before.hits;
     result.misses = after.misses - before.misses;
@@ -91,19 +160,19 @@ CacheStats WorkloadStats(const CacheStats& before, const CacheStats& after) {
     return result;
 }
 
-void WarmupCache(Cache& cache, const BenchmarkScenario& scenario, 
-    const std::string& value, std::optional<std::chrono::seconds> ttl) {
-
+void WarmupSimulator(CacheRequestSimulator& simulator, const BenchmarkScenario& scenario) {
     size_t warmup_count = std::min(scenario.cache_size, scenario.key_space_size);
     for (size_t i = 0; i < warmup_count; ++i) {
-        auto result = cache.Put("key:" + std::to_string(i), value, ttl);
+        auto result = simulator.Get(MakeKey(i));
         benchmark::DoNotOptimize(result);
     }
 }
 
-void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
-    CacheStats stats;
-    size_t put_errors = 0;
+void BMSimulatorWorkload(benchmark::State& state, BenchmarkScenario scenario) {
+    CacheRequestSimulatorStats simulator_stats;
+    CacheStats cache_stats;
+    size_t set_errors = 0;
+    size_t get_null_results = 0;
     size_t processed_operations = 0;
     std::vector<double> get_latencies_ns;
 
@@ -113,6 +182,7 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
         CacheConfig cache_config;
         cache_config.max_count = scenario.cache_size;
         cache_config.policy = scenario.policy;
+        cache_config.ttl = ToCacheTtl(scenario.ttl);
 
         auto cache_result = MakeCache(cache_config);
         if (!cache_result.has_value()) {
@@ -123,7 +193,18 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
 
         auto cache = std::move(cache_result.value());
         std::string value(scenario.value_size, 'x');
-        auto ttl = ToCacheTtl(scenario.ttl);
+
+        auto database_path_result = CreateDatabaseFile(scenario, value);
+        if (!database_path_result.has_value()) {
+            state.ResumeTiming();
+            state.SkipWithError(database_path_result.error().c_str());
+            return;
+        }
+
+        DatabaseFileGuard database_file(database_path_result.value());
+        TxtDatabase database(database_file.path);
+        CacheRequestSimulator simulator(*cache, database);
+
         std::vector<Operation> operations = GenerateWorkload(scenario);
         PartitionedOperations partitioned = PartitionOperations(operations);
         get_latencies_ns.clear();
@@ -139,14 +220,16 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
             return;
         }
 
-        WarmupCache(*cache, scenario, value, ttl);
-        CacheStats baseline_stats = cache->Stats();
+        WarmupSimulator(simulator, scenario);
+        CacheRequestSimulatorStats baseline_simulator_stats = simulator.Stats();
+        CacheStats baseline_cache_stats = cache->Stats();
 
         std::atomic<bool> start{false};
         std::atomic<size_t> ready_count{0};
         std::atomic<size_t> next_get{0};
         std::atomic<size_t> next_put{0};
-        std::atomic<size_t> current_put_errors{0};
+        std::atomic<size_t> current_set_errors{0};
+        std::atomic<size_t> current_get_null_results{0};
         std::atomic<size_t> current_processed_operations{0};
         const bool duration_mode = scenario.duration > std::chrono::milliseconds::zero();
         std::chrono::steady_clock::time_point stop_at;
@@ -183,12 +266,17 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
 
                     const Operation& operation = *partitioned.gets[index];
                     auto started = std::chrono::steady_clock::now();
-                    auto result = cache->Get(operation.key);
+                    auto result = simulator.Get(operation.key);
                     auto finished = std::chrono::steady_clock::now();
                     benchmark::DoNotOptimize(result);
                     latencies.push_back(static_cast<double>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started).count()));
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            finished - started).count()));
                     current_processed_operations.fetch_add(1, std::memory_order_relaxed);
+
+                    if (!result.has_value()) {
+                        current_get_null_results.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             });
         }
@@ -211,12 +299,12 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
                     index %= partitioned.puts.size();
 
                     const Operation& operation = *partitioned.puts[index];
-                    auto result = cache->Put(operation.key, value, ttl);
+                    auto result = simulator.Set(operation.key, value);
                     benchmark::DoNotOptimize(result);
                     current_processed_operations.fetch_add(1, std::memory_order_relaxed);
 
                     if (!result.has_value()) {
-                        current_put_errors.fetch_add(1, std::memory_order_relaxed);
+                        current_set_errors.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
             });
@@ -238,24 +326,32 @@ void BMCacheWorkload(benchmark::State& state, BenchmarkScenario scenario) {
 
         state.PauseTiming();
         get_latencies_ns = MergeLatencies(per_reader_latencies);
-        stats = WorkloadStats(baseline_stats, cache->Stats());
-        put_errors = current_put_errors.load(std::memory_order_relaxed);
+        simulator_stats = WorkloadSimulatorStats(baseline_simulator_stats, simulator.Stats());
+        cache_stats = WorkloadCacheStats(baseline_cache_stats, cache->Stats());
+        set_errors = current_set_errors.load(std::memory_order_relaxed);
+        get_null_results = current_get_null_results.load(std::memory_order_relaxed);
         processed_operations += current_processed_operations.load(std::memory_order_relaxed);
         state.ResumeTiming();
     }
 
     state.SetItemsProcessed(static_cast<int64_t>(processed_operations));
-    state.counters["hits"] = static_cast<double>(stats.hits);
-    state.counters["misses"] = static_cast<double>(stats.misses);
-    state.counters["hit_ratio"] = stats.HitRatio();
+    state.counters["hits"] = static_cast<double>(simulator_stats.cache_hits);
+    state.counters["misses"] = static_cast<double>(simulator_stats.cache_misses);
+    state.counters["hit_ratio"] = simulator_stats.HitRatio();
     state.counters["get_p50_ns"] = PercentileNs(get_latencies_ns, 0.50);
     state.counters["get_p99_ns"] = PercentileNs(get_latencies_ns, 0.99);
-    state.counters["puts"] = static_cast<double>(stats.puts);
-    state.counters["evictions"] = static_cast<double>(stats.evictions);
-    state.counters["expired"] = static_cast<double>(stats.expired);
-    state.counters["cache_size"] = static_cast<double>(stats.size);
-    state.counters["memory_estimate"] = static_cast<double>(stats.used_memory);
-    state.counters["put_errors"] = static_cast<double>(put_errors);
+    state.counters["database_hits"] = static_cast<double>(simulator_stats.database_hits);
+    state.counters["database_misses"] = static_cast<double>(simulator_stats.database_misses);
+    state.counters["writes"] = static_cast<double>(simulator_stats.writes);
+    state.counters["puts"] = static_cast<double>(simulator_stats.writes);
+    state.counters["erases"] = static_cast<double>(simulator_stats.erases);
+    state.counters["evictions"] = static_cast<double>(cache_stats.evictions);
+    state.counters["expired"] = static_cast<double>(cache_stats.expired);
+    state.counters["cache_size"] = static_cast<double>(cache_stats.size);
+    state.counters["memory_estimate"] = static_cast<double>(cache_stats.used_memory);
+    state.counters["set_errors"] = static_cast<double>(set_errors);
+    state.counters["put_errors"] = static_cast<double>(set_errors);
+    state.counters["get_null_results"] = static_cast<double>(get_null_results);
 }
 
 }  // namespace
@@ -280,8 +376,8 @@ int main(int argc, char** argv) {
     }
 
     for (const BenchmarkScenario& scenario : MakeBenchmarkScenarios(config)) {
-        benchmark::RegisterBenchmark(BuildBenchmarkName(scenario).c_str(), 
-            BMCacheWorkload, scenario)
+        benchmark::RegisterBenchmark(BuildBenchmarkName(scenario).c_str(),
+            BMSimulatorWorkload, scenario)
             ->Iterations(1)
             ->Repetitions(static_cast<int>(config.runs_per_config))
             ->UseRealTime();
