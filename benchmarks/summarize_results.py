@@ -16,8 +16,8 @@ PARAM_COLUMNS = [
     "duration_ms",
     "get",
     "ttl_ms",
-    "read_threads",
-    "write_threads",
+    "threads",
+    "miss_ns",
     "iterations_param",
     "repeats",
 ]

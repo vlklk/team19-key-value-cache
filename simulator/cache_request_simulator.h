@@ -1,8 +1,9 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <expected>
-#include <mutex>
 #include <optional>
 #include <string>
 
@@ -32,37 +33,42 @@ public:
 
 class CacheRequestSimulator {
 public:
-    CacheRequestSimulator(Cache& cache, TxtDatabase& database)
-        : cache_(cache), database_(database) {}
+  
+    explicit CacheRequestSimulator(
+        Cache& cache, TxtDatabase& database,
+        std::chrono::nanoseconds backing_store_latency = std::chrono::nanoseconds::zero())
+        : cache_(cache), database_(database), backing_store_latency_(backing_store_latency) {}
 
     std::optional<std::string> Get(const std::string& key) {
         auto cached = cache_.Get(key);
 
         if (cached.has_value()) {
-            AddCacheHit();
+            cache_hits_.fetch_add(1, std::memory_order_relaxed);
             return cached;
         }
 
-        AddCacheMiss();
+        cache_misses_.fetch_add(1, std::memory_order_relaxed);
 
+        BackingStoreDelay();
         auto stored = database_.Get(key);
 
         if (!stored.has_value()) {
-            AddDatabaseMiss();
+            database_misses_.fetch_add(1, std::memory_order_relaxed);
             return std::nullopt;
         }
 
-        AddDatabaseHit();
+        database_hits_.fetch_add(1, std::memory_order_relaxed);
 
         auto result = cache_.Put(key, *stored);
         if (!result.has_value()) {
-            AddCacheStoreError();
+            cache_store_errors_.fetch_add(1, std::memory_order_relaxed);
         }
 
         return stored;
     }
 
     std::expected<void, std::string> Set(const std::string& key, const std::string& value) {
+        BackingStoreDelay();
         auto database_result = database_.Set(key, value);
 
         if (!database_result.has_value()) {
@@ -71,10 +77,10 @@ public:
 
         auto cache_result = cache_.Put(key, value);
         if (!cache_result.has_value()) {
-            AddCacheStoreError();
+            cache_store_errors_.fetch_add(1, std::memory_order_relaxed);
         }
 
-        AddWrite();
+        writes_.fetch_add(1, std::memory_order_relaxed);
 
         return {};
     }
@@ -83,55 +89,42 @@ public:
         bool erased_from_database = database_.Erase(key);
         bool erased_from_cache = cache_.Erase(key);
 
-        if (erased_from_database || erased_from_cache) { AddErase(); }
+        if (erased_from_database || erased_from_cache) {
+            erases_.fetch_add(1, std::memory_order_relaxed);
+        }
 
         return erased_from_database || erased_from_cache;
     }
 
     CacheRequestSimulatorStats Stats() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        return stats_;
+        CacheRequestSimulatorStats stats;
+        stats.cache_hits = cache_hits_.load(std::memory_order_relaxed);
+        stats.cache_misses = cache_misses_.load(std::memory_order_relaxed);
+        stats.database_hits = database_hits_.load(std::memory_order_relaxed);
+        stats.database_misses = database_misses_.load(std::memory_order_relaxed);
+        stats.writes = writes_.load(std::memory_order_relaxed);
+        stats.erases = erases_.load(std::memory_order_relaxed);
+        stats.cache_store_errors = cache_store_errors_.load(std::memory_order_relaxed);
+        return stats;
     }
 
 private:
-    void AddCacheHit() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++stats_.cache_hits;
-    }
+    void BackingStoreDelay() const {
+        if (backing_store_latency_ == std::chrono::nanoseconds::zero()) { return; }
 
-    void AddCacheMiss() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++stats_.cache_misses;
-    }
-
-    void AddDatabaseHit() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++stats_.database_hits;
-    }
-
-    void AddDatabaseMiss() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++stats_.database_misses;
-    }
-
-    void AddWrite() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++stats_.writes;
-    }
-
-    void AddErase() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++stats_.erases;
-    }
-
-    void AddCacheStoreError() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++stats_.cache_store_errors;
+        auto deadline = std::chrono::steady_clock::now() + backing_store_latency_;
+        while (std::chrono::steady_clock::now() < deadline) {}
     }
 
     Cache& cache_;
     TxtDatabase& database_;
-    CacheRequestSimulatorStats stats_;
-    mutable std::mutex mutex_;
+    std::chrono::nanoseconds backing_store_latency_;
+
+    std::atomic<size_t> cache_hits_{0};
+    std::atomic<size_t> cache_misses_{0};
+    std::atomic<size_t> database_hits_{0};
+    std::atomic<size_t> database_misses_{0};
+    std::atomic<size_t> writes_{0};
+    std::atomic<size_t> erases_{0};
+    std::atomic<size_t> cache_store_errors_{0};
 };

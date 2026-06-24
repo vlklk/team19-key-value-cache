@@ -99,27 +99,6 @@ struct DatabaseFileGuard {
     std::filesystem::path path;
 };
 
-struct PartitionedOperations {
-    std::vector<const Operation*> gets;
-    std::vector<const Operation*> puts;
-};
-
-PartitionedOperations PartitionOperations(const std::vector<Operation>& operations) {
-    PartitionedOperations result;
-    result.gets.reserve(operations.size());
-    result.puts.reserve(operations.size());
-
-    for (const Operation& operation : operations) {
-        if (operation.type == OperationType::Get) {
-            result.gets.push_back(&operation);
-        } else {
-            result.puts.push_back(&operation);
-        }
-    }
-
-    return result;
-}
-
 std::vector<double> MergeLatencies(const std::vector<std::vector<double>>& per_thread_latencies) {
     size_t total_count = 0;
     for (const auto& latencies : per_thread_latencies) {
@@ -204,20 +183,20 @@ void BMSimulatorWorkload(benchmark::State& state, BenchmarkScenario scenario) {
 
         DatabaseFileGuard database_file(database_path_result.value());
         TxtDatabase database(database_file.path);
-        CacheRequestSimulator simulator(*cache, database);
+        CacheRequestSimulator simulator(
+            *cache, database, std::chrono::nanoseconds(scenario.miss_penalty_ns));
 
         std::vector<Operation> operations = GenerateWorkload(scenario);
-        PartitionedOperations partitioned = PartitionOperations(operations);
         get_latencies_ns.clear();
 
-        if (!partitioned.gets.empty() && scenario.read_threads == 0) {
+        if (scenario.threads == 0) {
             state.ResumeTiming();
-            state.SkipWithError("get operations require --read-threads > 0");
+            state.SkipWithError("workload requires --threads > 0");
             return;
         }
-        if (!partitioned.puts.empty() && scenario.write_threads == 0) {
+        if (operations.empty()) {
             state.ResumeTiming();
-            state.SkipWithError("put operations require --write-threads > 0");
+            state.SkipWithError("empty workload");
             return;
         }
 
@@ -227,16 +206,15 @@ void BMSimulatorWorkload(benchmark::State& state, BenchmarkScenario scenario) {
 
         std::atomic<bool> start{false};
         std::atomic<size_t> ready_count{0};
-        std::atomic<size_t> next_get{0};
-        std::atomic<size_t> next_put{0};
+        std::atomic<size_t> next_op{0};
         std::atomic<size_t> current_set_errors{0};
         std::atomic<size_t> current_get_null_results{0};
         std::atomic<size_t> current_processed_operations{0};
         const bool duration_mode = scenario.duration > std::chrono::milliseconds::zero();
         std::chrono::steady_clock::time_point stop_at;
-        std::vector<std::vector<double>> per_reader_latencies(scenario.read_threads);
+        std::vector<std::vector<double>> per_thread_latencies(scenario.threads);
         std::vector<std::thread> workers;
-        workers.reserve(scenario.read_threads + scenario.write_threads);
+        workers.reserve(scenario.threads);
 
         auto wait_for_start = [&]() {
             ready_count.fetch_add(1, std::memory_order_release);
@@ -245,68 +223,43 @@ void BMSimulatorWorkload(benchmark::State& state, BenchmarkScenario scenario) {
             }
         };
 
-        for (size_t reader_id = 0; reader_id < scenario.read_threads; ++reader_id) {
-            workers.emplace_back([&, reader_id] {
+        for (size_t thread_id = 0; thread_id < scenario.threads; ++thread_id) {
+            workers.emplace_back([&, thread_id] {
                 wait_for_start();
-                if (partitioned.gets.empty()) {
-                    return;
-                }
 
-                auto& latencies = per_reader_latencies[reader_id];
-                latencies.reserve(partitioned.gets.size() / scenario.read_threads + 1);
+                auto& latencies = per_thread_latencies[thread_id];
+                latencies.reserve(operations.size() / scenario.threads + 1);
 
                 while (true) {
-                    size_t index = next_get.fetch_add(1, std::memory_order_relaxed);
-                    if (!duration_mode && index >= partitioned.gets.size()) {
+                    size_t index = next_op.fetch_add(1, std::memory_order_relaxed);
+                    if (!duration_mode && index >= operations.size()) {
                         break;
                     }
                     if (duration_mode && std::chrono::steady_clock::now() >= stop_at) {
                         break;
                     }
-                    index %= partitioned.gets.size();
+                    index %= operations.size();
 
-                    const Operation& operation = *partitioned.gets[index];
-                    auto started = std::chrono::steady_clock::now();
-                    auto result = simulator.Get(operation.key);
-                    auto finished = std::chrono::steady_clock::now();
-                    benchmark::DoNotOptimize(result);
-                    latencies.push_back(static_cast<double>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            finished - started).count()));
+                    const Operation& operation = operations[index];
+                    if (operation.type == OperationType::Get) {
+                        auto started = std::chrono::steady_clock::now();
+                        auto result = simulator.Get(operation.key);
+                        auto finished = std::chrono::steady_clock::now();
+                        benchmark::DoNotOptimize(result);
+                        latencies.push_back(static_cast<double>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                finished - started).count()));
+                        if (!result.has_value()) {
+                            current_get_null_results.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    } else {
+                        auto result = simulator.Set(operation.key, value);
+                        benchmark::DoNotOptimize(result);
+                        if (!result.has_value()) {
+                            current_set_errors.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
                     current_processed_operations.fetch_add(1, std::memory_order_relaxed);
-
-                    if (!result.has_value()) {
-                        current_get_null_results.fetch_add(1, std::memory_order_relaxed);
-                    }
-                }
-            });
-        }
-
-        for (size_t writer_id = 0; writer_id < scenario.write_threads; ++writer_id) {
-            workers.emplace_back([&] {
-                wait_for_start();
-                if (partitioned.puts.empty()) {
-                    return;
-                }
-
-                while (true) {
-                    size_t index = next_put.fetch_add(1, std::memory_order_relaxed);
-                    if (!duration_mode && index >= partitioned.puts.size()) {
-                        break;
-                    }
-                    if (duration_mode && std::chrono::steady_clock::now() >= stop_at) {
-                        break;
-                    }
-                    index %= partitioned.puts.size();
-
-                    const Operation& operation = *partitioned.puts[index];
-                    auto result = simulator.Set(operation.key, value);
-                    benchmark::DoNotOptimize(result);
-                    current_processed_operations.fetch_add(1, std::memory_order_relaxed);
-
-                    if (!result.has_value()) {
-                        current_set_errors.fetch_add(1, std::memory_order_relaxed);
-                    }
                 }
             });
         }
@@ -326,7 +279,7 @@ void BMSimulatorWorkload(benchmark::State& state, BenchmarkScenario scenario) {
         }
 
         state.PauseTiming();
-        get_latencies_ns = MergeLatencies(per_reader_latencies);
+        get_latencies_ns = MergeLatencies(per_thread_latencies);
         simulator_stats = WorkloadSimulatorStats(baseline_simulator_stats, simulator.Stats());
         cache_stats = WorkloadCacheStats(baseline_cache_stats, cache->Stats());
         set_errors = current_set_errors.load(std::memory_order_relaxed);

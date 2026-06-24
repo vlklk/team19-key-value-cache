@@ -30,8 +30,8 @@ BenchmarkConfig DefaultBenchmarkConfig() {
     config.durations = {std::chrono::milliseconds{0}};
     config.get_ratios = {70};
     config.ttls = {std::chrono::milliseconds{0}};
-    config.read_threads = {1};
-    config.write_threads = {1};
+    config.threads = {1};
+    config.miss_penalty_ns = 2000;
     config.runs_per_config = 1;
     config.seed = 69420;
     return config;
@@ -236,7 +236,7 @@ bool IsCacheBenchmarkFlag(std::string_view name) {
     return name == "policy" || name == "profile" || name == "cache-size" ||
            name == "key-space" || name == "value-size" || name == "requests" ||
            name == "duration-ms" || name == "get-ratio" || name == "ttl-ms" ||
-           name == "read-threads" || name == "write-threads" || name == "runs" ||
+           name == "threads" || name == "miss-penalty-ns" || name == "runs" ||
            name == "seed";
 }
 
@@ -323,20 +323,20 @@ std::expected<void, std::string> ParseOption(BenchmarkConfig& config,
         config.ttls = std::move(parsed.value());
         return {};
     }
-    if (name == "read-threads") {
-        auto parsed = ParseSizeList(value, name, true);
-        if (!parsed.has_value()) { 
-            return std::unexpected(parsed.error()); 
+    if (name == "threads") {
+        auto parsed = ParseSizeList(value, name, false);
+        if (!parsed.has_value()) {
+            return std::unexpected(parsed.error());
         }
-        config.read_threads = std::move(parsed.value());
+        config.threads = std::move(parsed.value());
         return {};
     }
-    if (name == "write-threads") {
-        auto parsed = ParseSizeList(value, name, true);
-        if (!parsed.has_value()) { 
-            return std::unexpected(parsed.error()); 
+    if (name == "miss-penalty-ns") {
+        auto parsed = ParseSize(value, name, true);
+        if (!parsed.has_value()) {
+            return std::unexpected(parsed.error());
         }
-        config.write_threads = std::move(parsed.value());
+        config.miss_penalty_ns = parsed.value();
         return {};
     }
     if (name == "runs") {
@@ -418,23 +418,21 @@ std::vector<BenchmarkScenario> MakeBenchmarkScenarios(const BenchmarkConfig& con
                             for (auto duration : config.durations) {
                                 for (size_t get_ratio : get_ratios) {
                                     for (auto ttl : config.ttls) {
-                                        for (size_t read_threads : config.read_threads) {
-                                            for (size_t write_threads : config.write_threads) {
-                                                scenarios.push_back(BenchmarkScenario{
-                                                    policy,
-                                                    profile,
-                                                    cache_size,
-                                                    key_space_size,
-                                                    value_size,
-                                                    request_count,
-                                                    duration,
-                                                    get_ratio,
-                                                    ttl,
-                                                    read_threads,
-                                                    write_threads,
-                                                    config.seed,
-                                                });
-                                            }
+                                        for (size_t threads : config.threads) {
+                                            scenarios.push_back(BenchmarkScenario{
+                                                policy,
+                                                profile,
+                                                cache_size,
+                                                key_space_size,
+                                                value_size,
+                                                request_count,
+                                                duration,
+                                                get_ratio,
+                                                ttl,
+                                                threads,
+                                                config.miss_penalty_ns,
+                                                config.seed,
+                                            });
                                         }
                                     }
                                 }
@@ -461,8 +459,8 @@ std::string BuildBenchmarkName(const BenchmarkScenario& scenario) {
     out << "/duration_ms:" << scenario.duration.count();
     out << "/get:" << scenario.get_ratio;
     out << "/ttl_ms:" << scenario.ttl.count();
-    out << "/read_threads:" << scenario.read_threads;
-    out << "/write_threads:" << scenario.write_threads;
+    out << "/threads:" << scenario.threads;
+    out << "/miss_ns:" << scenario.miss_penalty_ns;
     return out.str();
 }
 
@@ -511,8 +509,8 @@ void PrintBenchmarkConfigHelp() {
               << "  --duration-ms=N[,N...] where 0 disables duration mode\n"
               << "  --get-ratio=N[,N...] where 0 <= N <= 100; defaults are profile-specific\n"
               << "  --ttl-ms=N[,N...] where 0 is disabled\n"
-              << "  --read-threads=N[,N...]\n"
-              << "  --write-threads=N[,N...]\n"
+              << "  --threads=N[,N...] worker threads (each runs the mixed read/write workload)\n"
+              << "  --miss-penalty-ns=N backing-store access latency on a read miss or write\n"
               << "  --runs=N\n"
               << "  --seed=N\n"
               << "  --help\n";

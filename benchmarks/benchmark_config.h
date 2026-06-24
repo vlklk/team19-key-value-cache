@@ -28,8 +28,8 @@ struct BenchmarkConfig {
     std::vector<std::chrono::milliseconds> durations;
     std::vector<size_t> get_ratios;
     std::vector<std::chrono::milliseconds> ttls;
-    std::vector<size_t> read_threads;
-    std::vector<size_t> write_threads;
+    std::vector<size_t> threads;
+    size_t miss_penalty_ns = 0;
     size_t runs_per_config = 1;
     uint64_t seed = 42;
     bool get_ratios_overridden = false;
@@ -46,8 +46,8 @@ struct BenchmarkScenario {
     std::chrono::milliseconds duration{0};
     size_t get_ratio = 0;
     std::chrono::milliseconds ttl{0};
-    size_t read_threads = 0;
-    size_t write_threads = 0;
+    size_t threads = 0;
+    size_t miss_penalty_ns = 0;
     uint64_t seed = 0;
 };
 
